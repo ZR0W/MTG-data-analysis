@@ -58,17 +58,11 @@ def plot_keyword_timeseries(
 
     keyword = df["keyword"].unique().to_list()[0] if "keyword" in df.columns else ""
     weighting = df["weighting"].unique().to_list()[0] if "weighting" in df.columns else ""
-    style_axes(ax, title=title or f"{keyword}: {metric.replace('_', ' ')}", ylabel=metric)
+    # The weighting scheme is named in the title, never left implicit.
+    default_title = f"{keyword}: {metric.replace('_', ' ')} ({weighting} weighting)"
+    style_axes(ax, title=title or default_title, ylabel=metric)
     ax.set_xlabel("set release date", color=MUTED_INK, fontsize=10)
     if metric in ("penetration_rate", "color_share"):
         ax.yaxis.set_major_formatter(lambda v, _: f"{v:.0%}")
     add_legend(ax)
-    ax.annotate(
-        f"weighting: {weighting}",
-        xy=(1.0, -0.18),
-        xycoords="axes fraction",
-        ha="right",
-        fontsize=8,
-        color=MUTED_INK,
-    )
     return ax

@@ -44,6 +44,7 @@ SEQUENTIAL_CMAP = "Blues"
 INK = "#33322e"
 MUTED_INK = "#73726c"
 GRID = "#e5e4df"
+SURFACE = "#fcfcfb"
 
 
 def style_axes(ax: Any, title: str | None = None, ylabel: str | None = None) -> Any:
@@ -76,6 +77,16 @@ def plot_color_series(ax: Any, x, y, color_code: str, label: str | None = None) 
     )
 
 
-def add_legend(ax: Any) -> Any:
-    legend = ax.legend(frameon=False, fontsize=9, labelcolor=MUTED_INK, ncols=3)
+def add_legend(ax: Any, ncols: int = 3) -> Any:
+    """Legend on the emptiest part of the plot, on the surface colour so marks stay legible."""
+    legend = ax.legend(
+        frameon=True,
+        fontsize=9,
+        labelcolor=MUTED_INK,
+        ncols=ncols,
+        loc="best",
+        framealpha=0.92,
+    )
+    legend.get_frame().set_facecolor(SURFACE)
+    legend.get_frame().set_edgecolor(GRID)
     return legend
