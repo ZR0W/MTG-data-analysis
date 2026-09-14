@@ -138,7 +138,10 @@ docs/HANDOFF.md           what still needs verifying against real Scryfall data
 - **Scryfall etiquette is a requirement, not a nicety**: descriptive `User-Agent` (set in
   `config/config.yaml`), bulk endpoint only, and no re-download inside the 24h TTL. A
   fresh cache means literally zero HTTP calls.
-- **`default_cards` is large** (multiple GB). It is only needed for `first_printed_year`;
+- **Bulk data is gzipped JSON Lines**, one card object per line — not a JSON array.
+  `load_cards` decompresses and parses a line at a time; the cached files are
+  `data/raw/{bulk_type}.jsonl.gz` (roughly 25 MB for `oracle_cards`, 78 MB for
+  `default_cards`). `default_cards` is only needed for `first_printed_year`;
   `build --skip-default-cards` falls back to each card's own printing year and sets
   `first_printed_year_is_estimate`.
 - **Keyword lookups are exact-match**, and Scryfall capitalizes only the first word

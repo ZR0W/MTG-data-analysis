@@ -25,11 +25,14 @@ set_type_exclude:
   - minigame
   - promo
   - treasure_chest
+  - vanguard
+  - planechase
+  - archenemy
 
 # The time axis is Magic sets in release order, not calendar buckets. Each set is one
 # period, running from its release date until the next set's release.
 #   per_set      -> one period per set (finest grain)
 #   rolling_sets -> group `group_size` consecutive sets into one period (noise smoothing)
 periods:
-  mode: per_set
-  group_size: 5
+  mode: rolling_sets
+  group_size: 10

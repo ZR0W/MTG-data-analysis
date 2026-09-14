@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import gzip
 import hashlib
+import json
 import logging
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 
-import ijson
 import requests
 
 from mtg_analysis.ingest.cache import (
@@ -55,7 +56,7 @@ class ScryfallBulkClient:
 
         remote = self._find_bulk_entry(bulk_type)
         scryfall_updated_at = datetime.fromisoformat(remote["updated_at"])
-        target = self.raw_dir / f"{bulk_type}.json"
+        target = self.raw_dir / f"{bulk_type}.jsonl.gz"
 
         if (
             not force
@@ -70,10 +71,10 @@ class ScryfallBulkClient:
             save_manifest(self.raw_dir, manifest)
             return entry.local_path
 
-        content_hash = self._download(remote["download_uri"], target)
+        content_hash = self._download(remote["jsonl_download_uri"], target)
         manifest[bulk_type] = CacheManifestEntry(
             bulk_type=bulk_type,
-            source_url=remote["download_uri"],
+            source_url=remote["jsonl_download_uri"],
             downloaded_at=datetime.now(UTC),
             scryfall_updated_at=scryfall_updated_at,
             local_path=target,
@@ -85,12 +86,16 @@ class ScryfallBulkClient:
     def load_cards(self, bulk_type: str, force_refresh: bool = False) -> Iterator[dict]:
         """Stream card objects out of the cached bulk file.
 
-        default_cards is hundreds of MB, so the array is parsed incrementally rather
-        than loaded whole.
+        Scryfall bulk data ships as gzip-compressed JSON Lines (one card object per
+        line), so this decompresses and parses a line at a time rather than holding
+        the whole file, or even the whole decompressed text, in memory.
         """
         path = self.fetch(bulk_type, force=force_refresh)
-        with path.open("rb") as fh:
-            yield from ijson.items(fh, "item")
+        with gzip.open(path, mode="rt", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if line:
+                    yield json.loads(line)
 
     def _find_bulk_entry(self, bulk_type: str) -> dict:
         for item in self.list_bulk_data():

@@ -1,3 +1,4 @@
+import gzip
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -13,7 +14,11 @@ from mtg_analysis.ingest.cache import (
     save_manifest,
 )
 
-DOWNLOAD_URL = "https://data.scryfall.io/oracle-cards/test.json"
+DOWNLOAD_URL = "https://data.scryfall.io/oracle-cards/test.jsonl.gz"
+
+
+def _jsonl_gz(rows: list[dict]) -> bytes:
+    return gzip.compress("\n".join(json.dumps(r) for r in rows).encode("utf-8"))
 
 
 def _entry(path: Path, downloaded_at: datetime, updated_at: datetime | None = None):
@@ -28,8 +33,8 @@ def _entry(path: Path, downloaded_at: datetime, updated_at: datetime | None = No
 
 
 def test_manifest_round_trip(tmp_path):
-    path = tmp_path / "oracle_cards.json"
-    path.write_text("[]")
+    path = tmp_path / "oracle_cards.jsonl.gz"
+    path.write_bytes(_jsonl_gz([]))
     entry = _entry(path, datetime(2026, 1, 1, tzinfo=UTC))
     save_manifest(tmp_path, {"oracle_cards": entry})
     loaded = load_manifest(tmp_path)["oracle_cards"]
@@ -45,7 +50,7 @@ def test_cache_is_stale_without_entry():
 
 
 def test_cache_is_stale_when_file_is_gone(tmp_path):
-    entry = _entry(tmp_path / "gone.json", datetime.now(UTC))
+    entry = _entry(tmp_path / "gone.jsonl.gz", datetime.now(UTC))
     assert is_cache_fresh(entry, 24) is False
 
 
@@ -54,8 +59,8 @@ def test_cache_is_stale_when_file_is_gone(tmp_path):
     [(1, True), (23, True), (25, False)],
 )
 def test_ttl_boundary(tmp_path, age_hours, expected):
-    path = tmp_path / "oracle_cards.json"
-    path.write_text("[]")
+    path = tmp_path / "oracle_cards.jsonl.gz"
+    path.write_bytes(_jsonl_gz([]))
     now = datetime.now(UTC)
     entry = _entry(path, now - timedelta(hours=age_hours))
     assert is_cache_fresh(entry, 24, now=now) is expected
@@ -70,19 +75,20 @@ def test_fetch_downloads_and_records_manifest(tmp_path):
             "data": [
                 {
                     "type": "oracle_cards",
-                    "download_uri": DOWNLOAD_URL,
+                    "jsonl_download_uri": DOWNLOAD_URL,
                     "updated_at": "2026-09-06T09:00:00+00:00",
                 }
             ]
         },
     )
-    responses.add(responses.GET, DOWNLOAD_URL, body=json.dumps([{"oracle_id": "x"}]))
+    responses.add(responses.GET, DOWNLOAD_URL, body=_jsonl_gz([{"oracle_id": "x"}]))
 
     client = ScryfallBulkClient("test-agent/1.0", tmp_path)
     path = client.fetch("oracle_cards")
 
     assert path.exists()
-    assert json.loads(path.read_text()) == [{"oracle_id": "x"}]
+    with gzip.open(path, "rt", encoding="utf-8") as fh:
+        assert [json.loads(line) for line in fh] == [{"oracle_id": "x"}]
     entry = load_manifest(tmp_path)["oracle_cards"]
     assert entry.source_url == DOWNLOAD_URL
     assert responses.calls[0].request.headers["User-Agent"] == "test-agent/1.0"
@@ -90,8 +96,8 @@ def test_fetch_downloads_and_records_manifest(tmp_path):
 
 @responses.activate
 def test_fresh_cache_makes_no_network_calls(tmp_path):
-    path = tmp_path / "oracle_cards.json"
-    path.write_text("[]")
+    path = tmp_path / "oracle_cards.jsonl.gz"
+    path.write_bytes(_jsonl_gz([]))
     save_manifest(tmp_path, {"oracle_cards": _entry(path, datetime.now(UTC))})
 
     client = ScryfallBulkClient("test-agent/1.0", tmp_path)
@@ -101,8 +107,8 @@ def test_fresh_cache_makes_no_network_calls(tmp_path):
 
 @responses.activate
 def test_stale_cache_skips_download_when_upstream_is_unchanged(tmp_path):
-    path = tmp_path / "oracle_cards.json"
-    path.write_text("[]")
+    path = tmp_path / "oracle_cards.jsonl.gz"
+    path.write_bytes(_jsonl_gz([]))
     updated_at = datetime(2026, 9, 1, tzinfo=UTC)
     save_manifest(
         tmp_path,
@@ -119,7 +125,7 @@ def test_stale_cache_skips_download_when_upstream_is_unchanged(tmp_path):
             "data": [
                 {
                     "type": "oracle_cards",
-                    "download_uri": DOWNLOAD_URL,
+                    "jsonl_download_uri": DOWNLOAD_URL,
                     "updated_at": updated_at.isoformat(),
                 }
             ]
@@ -151,7 +157,7 @@ def test_load_cards_streams_objects(tmp_path):
             "data": [
                 {
                     "type": "oracle_cards",
-                    "download_uri": DOWNLOAD_URL,
+                    "jsonl_download_uri": DOWNLOAD_URL,
                     "updated_at": "2026-09-06T09:00:00+00:00",
                 }
             ]
@@ -160,7 +166,7 @@ def test_load_cards_streams_objects(tmp_path):
     responses.add(
         responses.GET,
         DOWNLOAD_URL,
-        body=json.dumps([{"oracle_id": "a"}, {"oracle_id": "b"}]),
+        body=_jsonl_gz([{"oracle_id": "a"}, {"oracle_id": "b"}]),
     )
     client = ScryfallBulkClient("test-agent/1.0", tmp_path)
     assert [c["oracle_id"] for c in client.load_cards("oracle_cards")] == ["a", "b"]
