@@ -1,126 +1,172 @@
 # MTG-data-analysis
 
-A reusable local dataset of Magic: The Gathering cards, built for asking how keyword
-mechanics are distributed across colours and how that distribution has changed over time.
+A reusable, queryable dataset of every Magic: The Gathering card, built to answer one
+family of questions rigorously: **which colours own which keyword mechanics, and how has
+that changed over the game's history?**
 
-The point is to parse Scryfall's bulk data **once** into normalized tables, then answer
-many questions against those tables — not to re-scrape or re-derive per question.
+Scryfall bulk data is downloaded once, parsed once into normalized Parquet tables, and
+then queried repeatedly through DuckDB. It is deliberately not a script that re-scrapes or
+re-derives per question — the tables are the product, and new questions are joins against
+them.
+
+Currently covering **38,633 unique cards across 574 sets**, from Alpha to the present.
+
+## Why it is built this way
+
+Three traps make casual "colour pie" analysis wrong, and the whole design exists to avoid
+them:
+
+1. **Multicolour attribution.** Is a Boros card a red card or a white card? Both answers
+   are legitimate, so both are stored — every metric takes a `weighting` argument and
+   states which one produced the number. Nothing picks silently.
+2. **Share vs. penetration.** "60% of Double Strike is red" and "6% of red cards have
+   Double Strike" are different claims that can move in *opposite directions*. They are
+   always reported together, with the denominator.
+3. **Print volume.** Magic printed ~250 cards a year in 1996 and thousands now. A raw
+   count without its denominator is not a finding, so the denominator table is a
+   first-class citizen.
+
+## What it found
+
+Red and Haste, over 574 sets — the divergence this project exists to catch:
+
+![Haste penetration and share by colour](docs/images/timeseries_haste.png)
+
+Red's **penetration** climbs from near zero in 1996 to 8–15% of all red cards today (top),
+while red's **share** of all Haste *falls* from ~90% to ~60–70% (bottom). Both are true.
+Read either one alone and you get the story backwards.
+
+The colour pie as it stands today, across the twenty most-used keywords:
+
+![Keyword by colour heatmap](docs/images/heatmap_keyword_colour.png)
+
+Each row sums to 100%, so this compares colours *within* a keyword: Haste 68% red,
+Reach 64% green, Deathtouch 62% black, Equip 59% colourless.
+
+And a rules-bloat signal that holds across every colour — mean rules-text length roughly
+doubled since 2000, with mean keyword count per card rising alongside it:
+
+![Complexity proxy](docs/images/complexity_by_colour.png)
 
 ## Quick start
 
 ```bash
 uv sync --all-groups
-uv run mtg-analysis fetch      # downloads Scryfall bulk data (at most once per 24h)
-uv run mtg-analysis build      # parses it into data/processed/*.parquet
-uv run mtg-analysis validate   # data-quality checks on the built tables
-uv run jupyter lab notebooks/  # the analyses
+uv run mtg-analysis fetch      # Scryfall bulk data → data/raw (cached, 24h TTL)
+uv run mtg-analysis build      # → data/processed/*.parquet
+uv run mtg-analysis validate   # data-quality checks
+uv run jupyter lab notebooks/
 ```
 
-`data/` is gitignored — the two CLI commands regenerate it from scratch.
+`data/` is gitignored; those two commands rebuild it from scratch in a few minutes.
 
-## How the pipeline is split
+## How it works
 
-**Ingestion** (`ingest/`) only ever uses Scryfall's `/bulk-data` endpoint, sends a
-descriptive `User-Agent`, and records every download in `data/raw/manifest.json`. While a
-cached file is younger than the TTL, `fetch` makes **zero network calls**; past the TTL it
-checks the upstream `updated_at` and skips the download if nothing changed.
+```
+Scryfall bulk data      (gzipped JSON Lines, cached in data/raw, never re-downloaded
+        │                inside the 24h TTL — a fresh cache makes zero HTTP calls)
+        │  transform/   parse once: union multi-face cards, resolve colours,
+        ▼               attach both weights, order sets by release date
+5 Parquet tables        (data/processed/)
+        │  analysis/db.py registers DuckDB views
+        ▼
+card_facts · keyword_facts · period_color_totals
+        │
+        ▼
+metrics/ + analysis/    the eight analyses below
+```
 
-**Transform** (`transform/`) is the only code that parses raw JSON. It is idempotent: the
-same cache produces the same tables, so re-running an analysis never re-parses the bulk
-file.
+| Table | Grain |
+|---|---|
+| `cards` | one row per `oracle_id` — resolved colours/keywords, `first_printed_year`, `is_multiface`, `in_paper_only` |
+| `card_colors` | card × colour, carrying both weighting schemes |
+| `card_keywords` | card × keyword |
+| `sets` | one row per set — the chronological timeline axis |
+| `color_totals` | set × colour × weighting × filter — the denominator for every rate |
 
-**Metrics and analysis** (`metrics/`, `analysis/`) read only the parquet tables, through
-DuckDB views.
+Ingestion and analysis are separate and idempotent: re-running an analysis never re-parses
+the bulk file, and changing the time grouping never requires a rebuild.
 
-## Tables
+### The two weightings
 
-| Table | Grain | Notes |
-|---|---|---|
-| `cards` | one row per `oracle_id` | resolved colours/keywords, `first_printed_year`, `is_multiface`, `in_paper_only` |
-| `card_colors` | card x colour | both weighting schemes |
-| `card_keywords` | card x keyword | the core join key |
-| `sets` | one row per set | the chronological timeline axis |
-| `color_totals` | set x colour x weighting x filter | the denominator for every rate |
+For a card with $n$ colours, each colour gets `weight_fractional` = 1/n and
+`weight_inclusive` = 1.0. Fractional makes shares sum to 100% ("what share of Haste is
+red"); inclusive counts a gold card fully for each colour ("how many red cards have
+Haste"). Colourless cards get a single `C` row with both weights at 1.0.
 
-Two derived views are registered on connect: `card_facts` (cards joined to colours and
-periods) and `keyword_facts` (the same, joined to keywords).
+### The time axis is sets, not years
 
-### Multi-faced cards
-
-For transform / modal DFC / split / adventure / meld cards, top-level `colors` can be null
-and keywords can live on the faces. Resolution triggers on the *presence of `card_faces`*
-rather than on a list of layout names, so layouts Scryfall adds later still resolve.
-Colours and keywords are unioned across faces, `cmc` always comes from the top level (never
-summed per face), and the card is flagged `is_multiface` so it can be excluded where
-face-splitting would distort a result.
-
-### Colour weighting
-
-Multicolour attribution is never silently collapsed to one scheme — both are stored:
-
-- `weight_fractional` = 1/n per colour. Shares sum to 100% across the pie; use it for
-  "60% of Double Strike is red".
-- `weight_inclusive` = 1.0 per colour. Counts can exceed the card count when summed; use it
-  for "any card touching red".
-
-Colourless cards get a single `C` row with both weights at 1.0. Every function that uses a
-weighting takes it as an argument and labels it in its output.
-
-### The time axis is sets, not calendar buckets
-
-Each Magic set is one period, running from its release until the next set's release, with
-sets ordered by release date (`sets.set_order`). Set-level grain is what gets materialized;
-grouping into coarser periods happens at query time:
+One period is a run of consecutive sets in release order — not a calendar bucket. The
+default groups 10 sets (`rolling_sets` in `config/config.yaml`), because 574 single-set
+periods are unreadable and noisy. Grouping is applied at query time:
 
 ```python
 from mtg_analysis.analysis.db import get_connection, set_period_config
 from mtg_analysis.config import PeriodGroupConfig
 
-con = get_connection("data/processed")                                  # one period per set
-set_period_config(con, PeriodGroupConfig("rolling_sets", group_size=5))  # 5 sets per period
+con = get_connection("data/processed")
+set_period_config(con, PeriodGroupConfig(mode="per_set"))  # or rolling_sets, any size
 ```
 
-Changing the grouping never requires a rebuild.
-
-### Set filtering
-
-`in_paper_only` marks cards outside the excluded `set_type` list in `config/config.yaml`
-(`masters`, `memorabilia`, `funny`, `token`, `alchemy`, …). Analysis defaults to
-`set_type_filter="paper_only"`; pass `"unfiltered"` for questions that need reprint sets.
-The flag lives on the card itself so a rate's numerator and its `color_totals` denominator
-can never fall out of sync.
-
-## The three metrics, and why they ship together
+### The three metrics
 
 ```python
 from mtg_analysis.metrics.core import trend_report
-trend_report(con, "Double strike", "R")
+trend_report(con, "Double strike", "R")   # raw count, share, penetration, denominator
 ```
 
-1. **Raw count** — an unweighted headcount.
-2. **Colour share** — that colour's slice of the keyword. "60% of Double Strike is red."
-3. **Penetration rate** — the share of that colour's cards carrying the keyword, against
-   `color_totals`. "What % of red cards have Haste, and is it rising."
+Zero denominators return `NaN`, never `0.0` — "no data" and "0% share" are different
+claims.
 
-(2) and (3) can move in opposite directions — a colour's share of a keyword can rise while
-its actual usage falls, because every colour printed less of it. `trend_report` returns
-all three plus the denominator so that trap is visible rather than latent. A zero
-denominator yields `NaN`, never a misleading `0%`.
+## The eight analyses
 
-## Analyses
+Each is a reusable function returning a Polars DataFrame, with a separate `plot_*` helper.
 
-`analysis/` holds the eight deliverables as reusable functions, each returning a Polars
-DataFrame with a matching `plot_*` helper: keyword x colour heatmap, per-keyword time
-series, colour identity drift (cosine similarity of keyword mixes), pie-break tracking,
-rarity migration, type-line crossover, a complexity proxy, and the design-volume context
-chart.
+| # | Analysis | Question |
+|---|---|---|
+| 1 | [Keyword × colour heatmap](docs/images/heatmap_keyword_colour.png) | Who owns what, over all history |
+| 2 | [Time series](docs/images/timeseries_haste.png) | Penetration and share per (keyword, colour) over time |
+| 3 | [Colour identity drift](docs/images/colour_drift.png) | Has a colour's toolbox shifted? (cosine similarity of keyword mixes) |
+| 4 | [Pie-break tracking](docs/images/pie_break_double_strike.png) | Has a mechanic leaked out of the colour that owned it? |
+| 5 | [Rarity migration](docs/images/rarity_migration_haste.png) | Is a mechanic being pushed to common, or rare-gated? |
+| 6 | [Type-line crossover](docs/images/type_crossover_haste.png) | Has it moved off creatures onto spells? |
+| 7 | [Complexity proxy](docs/images/complexity_by_colour.png) | Rules bloat, by colour and period |
+| 8 | [Design volume](docs/images/design_volume.png) | Cards printed per colour per period — the denominator, plotted |
+
+## Notebooks
+
+Two notebooks walk through all eight with full explanations — what each measure is for,
+which table it reads, the formula with a worked example, and the misreading each chart
+invites:
+
+- `notebooks/01_exploratory_heatmap.ipynb` — heatmap, headline numbers, time series,
+  design volume. Start here; it also explains the weightings and denominators.
+- `notebooks/02_trend_deep_dive.ipynb` — drift, pie-break, rarity, type crossover,
+  complexity.
+
+Rendered screenshots of both, executed against the full dataset, are in
+[`docs/screenshots/`](docs/screenshots) — four images per notebook covering the whole page
+([01: 1](docs/screenshots/notebook01_part1.png) · [2](docs/screenshots/notebook01_part2.png) ·
+[3](docs/screenshots/notebook01_part3.png) · [4](docs/screenshots/notebook01_part4.png) ·
+[02: 1](docs/screenshots/notebook02_part1.png) · [2](docs/screenshots/notebook02_part2.png) ·
+[3](docs/screenshots/notebook02_part3.png) · [4](docs/screenshots/notebook02_part4.png)).
+
+## Status
+
+Working and verified against live Scryfall data: 75 tests pass, ruff clean, `validate`
+passes on all 38,633 cards with zero parser drops across every awkward layout (transform,
+modal DFC, split, adventure, meld, art series).
+
+Known gaps and next steps are tracked in [`docs/HANDOFF.md`](docs/HANDOFF.md). The largest
+is that sparse keywords — anything with only a handful of appearances — interact badly
+with fine-grained periods in the pie-break analysis.
 
 ## Future work
 
-`extensions/` is stubbed, not implemented: informal mechanic mining over `oracle_text`
-(impulse draw, rummaging) and functional categorization (removal, ramp, card draw). Both
-emit `(oracle_id, mechanic)` rows so they plug into the existing `color_totals` rate math
-unchanged.
+`src/mtg_analysis/extensions/` is stubbed with the intended shape, not implemented:
+informal mechanic mining over `oracle_text` (impulse draw, rummaging) and functional
+categorisation (removal, ramp, card draw). Both would emit `(oracle_id, mechanic)` rows so
+they plug into the existing `color_totals` rate math unchanged.
 
 ## Development
 
@@ -128,3 +174,9 @@ unchanged.
 uv run pytest
 uv run ruff check .
 ```
+
+Agent-oriented notes on the invariants that must not break live in
+[`CLAUDE.md`](CLAUDE.md).
+
+Card data from [Scryfall](https://scryfall.com). Bulk endpoint only, cached locally,
+descriptive User-Agent — please keep it that way if you fork this.

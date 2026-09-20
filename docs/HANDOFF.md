@@ -1,111 +1,151 @@
-# Handoff: real-data verification (done) and what's left
+# Handoff — project state, open issues, and ideas
 
-Real-data verification is **complete** as of this handoff. The pipeline now runs
-end-to-end against live Scryfall data, one real bug was found and fixed, and two
-config defaults were changed based on what real density revealed. This doc records
-that work for the next session — read the "Findings" section before touching
-ingestion or config, and see "Still open" for what nobody has checked yet.
+Living status doc. Read this before picking the project up; it records what is finished,
+what is known-broken or unverified, and what is worth building next.
 
-## Status
+**Last updated:** 2026-09-20, on branch `claude/mtg-keyword-color-trends-cbftfq`.
 
-Branch: `claude/mtg-keyword-color-trends-cbftfq`
-Latest commit: `911d1d5` (real-data fix + default tuning), on top of `b8c5c70`,
-`f2a6334`, `a0b7044`.
+## Where the project stands
 
-**Verified against live Scryfall data in this session**
+The pipeline is complete and verified against live Scryfall data. 75 tests pass, ruff is
+clean, and `validate` passes on the full dataset: **38,633 cards across 574 sets**.
 
-- `uv run mtg-analysis fetch` — real download, real cache-hit-on-second-run
-  behavior confirmed (zero HTTP calls on repeat within TTL).
-- `uv run mtg-analysis build` — real `default_cards` pass ran (not skipped);
-  `first_printed_year_is_estimate` is `false` for all 38,633 rows.
-- `uv run mtg-analysis validate` — passes: `OK: 38633 cards, 24932 keyword rows,
-  44698 color rows, 7426 denominator rows`.
-- `parse_card` dropped **zero** of the 38,633 raw `oracle_cards` objects.
-- Spot-checked all five awkward layouts from the original ask (transform, modal
-  DFC, split, adventure, meld) — all correct. See "Findings" below for the one
-  real layout surprise (`art_series`).
-- Keyword distributions match Magic knowledge (Double strike W/R, Flying U/W,
-  Reach G-dominant, Deathtouch B-then-G).
-- Brief's example claim reproduced: Double strike/R share and penetration
-  diverge (0.418 fractional share vs 0.0085 penetration) — confirms the brief's
-  premise.
-- Both notebooks execute end-to-end against real data with no errors.
-- 75 tests pass, ruff clean, after updating fixtures to match the real API.
+| Area | State |
+|---|---|
+| Ingestion (`ingest/`) | Done. Bulk endpoint only, 24h TTL, cache-hit makes zero HTTP calls. Verified live. |
+| Normalization (`transform/`) | Done. Five Parquet tables; zero parser drops on 38,633 real cards. |
+| Metrics (`metrics/core.py`) | Done. Raw count, colour share, penetration rate, `trend_report`. |
+| The eight analyses (`analysis/`) | Done. All return DataFrames with separate `plot_*` helpers. |
+| Notebooks | Done. Both execute end to end; full educational write-ups with worked examples; outputs committed. |
+| Docs | Done. `README.md` (project description + real-data charts), `CLAUDE.md` (agent invariants), this file. |
+| Extensions (`extensions/`) | Deliberately stubbed — see "Ideas" below. |
 
-## Findings from this session
+Real-data checks that have actually been run:
 
-1. **Real bug: Scryfall's `/bulk-data` endpoint no longer returns `download_uri`.**
-   It now only provides `jsonl_download_uri`, pointing to a gzip-compressed JSON
-   Lines file (not the plain JSON array the pipeline was built against). This
-   crashed `fetch` immediately with `KeyError: 'download_uri'` on first live run.
-   Fixed in `src/mtg_analysis/ingest/bulk_client.py`: reads `jsonl_download_uri`,
-   caches as `{bulk_type}.jsonl.gz`, and `load_cards` decompresses with `gzip`
-   and parses line-by-line instead of `ijson.items()` over a JSON array (still
-   streams, still memory-flat). `ijson` was dropped as a dependency. Real file
-   sizes are much smaller than the old estimate since they're compressed:
-   `oracle_cards` ~25 MB, `default_cards` ~78 MB (not the 150–250 MB / multi-GB
-   figures in the original ask, which assumed uncompressed JSON).
-2. **`art_series` layout, seen for real**: 2,243 cards (e.g. the Valki gallery-art
-   variant), each its own `oracle_id` with `colors=[]`/`cmc=0`. This is correct —
-   they're genuinely non-functional art cards — and Scryfall already tags them
-   `set_type: memorabilia`, which was already excluded from `paper_only`. No fix
-   needed here; confirms the exclude list does its job for this layout.
-3. **`vanguard`/`planechase`/`archenemy` were polluting `paper_only`.**
-   `vanguard` cards are 100% colorless (they're avatars, not castable spells);
-   `planechase`/`archenemy` are ~45–55% colorless (Plane/Scheme game pieces mixed
-   with real reprints). Together they were ~239 of 3,758 colorless-bucket rows
-   (~6%) under the old config. **Fixed**: added all three to `set_type_exclude`
-   in `config/config.yaml` (user-approved). Note this excludes the real reprints
-   bundled into those product's canonical printings too, same coarse-grained
-   tradeoff the existing `masters`/`memorabilia`/`funny` exclusions already make.
-4. **Per-set charts are unreadable at real density** (574 real sets vs. the
-   24-set synthetic fixture). Confirmed visually: Haste/design-volume/complexity
-   timeseries were badly overplotted, and the `color_drift` legend sat on top of
-   data. Tested `rolling_sets` grouping (group_size=10) — materially clearer.
-   **Fixed**: changed `periods.mode` from `per_set` to `rolling_sets` in
-   `config/config.yaml` (user-approved), group_size 10.
-5. **Distinct `set_type` values in real data** (21 total, up from what the brief
-   assumed): `alchemy, archenemy, arsenal, box, commander, core,
-   draft_innovation, duel_deck, eternal, expansion, funny, masterpiece, masters,
-   memorabilia, minigame, planechase, promo, starter, token, treasure_chest,
-   vanguard`. Only `vanguard`/`planechase`/`archenemy` needed action (see #3);
-   the rest were already handled correctly by the existing exclude list or are
-   legitimately `paper_only` (e.g. `commander`, `expansion`, `core`).
+- `fetch` twice — second run logged a cache hit with no HTTP calls.
+- `build` with the full `default_cards` pass: `first_printed_year_is_estimate` is false for
+  all 38,633 rows.
+- `validate`: `OK: 38633 cards, 24932 keyword rows, 44698 color rows, 7426 denominator rows`.
+- All five awkward layouts spot-checked (transform, modal DFC, split, adventure, meld),
+  plus `art_series` found in the wild and confirmed correctly excluded.
+- Keyword distributions sanity-check against Magic knowledge: Haste 68% red, Reach 64%
+  green, Deathtouch 62% black, Equip 59% colourless.
+- The brief's premise reproduced: for Double strike/red, fractional share 0.418 against
+  penetration 0.0085 — the two metrics genuinely diverge. Haste/red shows the reverse
+  divergence over time (penetration rising ~0→12%, share falling ~90%→65%).
 
-## Still open — nobody has checked these yet
+## Fixed along the way
 
-- **`color_drift`'s x-axis uses its own period-order scheme**, not the
-  `period_color_totals`/`set_period_config` grouping the other seven
-  deliverables use — it was still busy (though not as bad as the others) after
-  switching the default to `rolling_sets`, because it isn't affected by that
-  setting. Worth deciding whether it should respect the same period config, or
-  whether its current per-comparison-index axis is intentional.
-- **`rolling_sets` group_size=10 was picked from a quick visual check on two
-  charts** (Haste penetration, design volume), not all eight analysis
-  deliverables. Worth eyeballing the rest (`rarity_migration`, `type_crossover`,
-  `pie_break`, `heatmap`) at group_size 10 before treating it as final — it may
-  want to be larger or smaller per-chart.
-- **Sets sharing a release date, tiebroken by set code**: this affects
-  `set_order` and therefore `rolling_sets` grouping boundaries at real density.
-  Never spot-checked against real duplicate-release-date sets.
-- **Only two notebooks and a handful of ad-hoc queries were run.** No attempt
-  was made to stress-test extreme cases (e.g. keywords with only 1-2 total
-  appearances in real data, which will produce a lot of `NaN`/zero-denominator
-  rows in `trend_report`).
+1. **Scryfall dropped `download_uri`.** The endpoint now returns only
+   `jsonl_download_uri`, pointing at gzipped JSON Lines rather than a JSON array. This
+   crashed `fetch` with `KeyError` on first live contact. `bulk_client.py` now reads that
+   field, caches `{bulk_type}.jsonl.gz`, and streams with `gzip` + line-by-line
+   `json.loads`; `ijson` was dropped. Real sizes are ~25 MB (`oracle_cards`) and ~78 MB
+   (`default_cards`) compressed.
+2. **`vanguard`/`planechase`/`archenemy` polluted `paper_only`** — Avatars, Planes and
+   Schemes are game pieces, not castable cards, and were ~6% of the colourless bucket. All
+   three added to `set_type_exclude`.
+3. **Per-set periods are unreadable at 574 sets.** Default changed to `rolling_sets` with
+   `group_size: 10`.
+4. **`art_series`** (2,243 cards) needed no fix — Scryfall tags them `memorabilia`, which
+   was already excluded.
 
-## Setup (unchanged)
+## Open issues
+
+### 1. Pie-break silently picks a modern period as "historical" (highest priority)
+
+Running `pie_break(con, "Double strike")` at `group_size=5` produces a series that
+**starts in 2018**, and labels white the `original_dominant_color` — even though the
+keyword debuted in Legions in 2003. No earlier period cleared `min_period_weight=3.0`,
+because a sparse keyword spread across ~115 periods averages about one appearance each.
+The function then takes "the earliest qualifying period" at face value and reports a 2018
+snapshot as the mechanic's historical owner.
+
+Nothing errors; the output is just wrong in a way only domain knowledge catches. Worth
+fixing before anyone quotes a pie-break result. Options, roughly in order of preference:
+
+- Pick the historical owner from the earliest periods that *together* hold some share of
+  the keyword's all-time weight (say the first 10%), rather than the first period over a
+  fixed threshold.
+- Auto-coarsen the grouping for sparse keywords instead of dropping periods.
+- At minimum, return the qualifying-period count and the dominant period's date in the
+  frame, and have `plot_pie_break` say which period the owner came from.
+
+### 2. `color_drift`'s x-axis is ordinal, not dated
+
+A correction to what this doc previously claimed: `keyword_vectors` reads `period` and
+`period_order` from `keyword_facts`, so drift **does** respect `set_period_config` like
+everything else. The real difference is in the plot — `plot_color_drift` puts
+`period_order` (an integer index) on the x-axis, where the other seven charts use
+`period_released_at` (a date). Because drift also drops periods under
+`min_keyword_weight`, that index is not evenly spaced in time, so the line implies a
+regular cadence that does not exist. Switching the axis to `period_released_at` is a
+small change.
+
+### 3. `group_size=10` was validated on two charts, not eight
+
+It was chosen by eyeballing Haste penetration and design volume. `rarity_migration`,
+`type_crossover`, `pie_break` and the heatmap were never checked at that setting — and
+issue #1 suggests sparse-keyword charts may want a different grouping entirely. A
+per-chart default may be more honest than one global number.
+
+### 4. Sets sharing a release date
+
+Ties are broken by set code, which fixes `set_order` and therefore every `rolling_sets`
+boundary. Never spot-checked against real same-day releases, of which there are many in
+the modern schedule.
+
+### 5. Sparse keywords are unstress-tested generally
+
+Keywords with one or two total appearances will produce `NaN`/zero-denominator rows
+throughout `trend_report`. The `NaN` semantics are correct by design, but nobody has
+looked at what the charts do with them.
+
+## Ideas worth building
+
+**Near-term, small:**
+
+- **`mtg-analysis report`** — render all eight analyses to static PNG/HTML without
+  Jupyter. Deferred at planning time; now that charts are committed to `docs/images/`,
+  this would also keep the README current automatically.
+- **Confidence bands on rates.** A penetration rate computed from a three-card denominator
+  should not look as solid as one from three hundred. Even a simple binomial interval
+  would stop small periods from reading as signal.
+- **Reprint analysis.** `default_cards` is already fetched for `first_printed_year` but
+  otherwise unused — printing counts per `oracle_id` would answer "how often has this been
+  reprinted, and does that correlate with keyword or colour?"
+
+**The brief's Step 6, still unbuilt:**
+
+- **Informal mechanic mining** (`extensions/text_mining.py`) — regex/pattern dictionary
+  over `oracle_text` for the mechanics that have no formal keyword: impulse draw
+  ("exile the top card… you may play it this turn"), rummaging, scry-adjacent effects.
+- **Functional categorisation** (`extensions/categorization.py`) — removal, ramp, card
+  draw, counterspells. This is what answers "is card draw still blue-dominant?"
+- **Power/toughness and mana efficiency by colour over time** — creature stats per mana
+  value, which would show power creep directly rather than by proxy.
+
+Both stubs emit `(oracle_id, mechanic)` rows precisely so they join to `card_facts` and
+reuse every existing rate calculation unchanged.
+
+**Bigger:**
+
+- **Set-level design fingerprints** — cluster sets by their keyword mix to find which sets
+  were mechanically unusual for their era.
+- **Colour-pair analysis** — the current model attributes to single colours; guild-level
+  identity (Boros vs Izzet toolboxes) is a different and interesting cut.
+
+## Setup
 
 ```bash
 git clone https://github.com/ZR0W/MTG-data-analysis.git
 cd MTG-data-analysis
 git checkout claude/mtg-keyword-color-trends-cbftfq
 uv sync --all-groups
-uv run pytest          # expect 75 passed
-uv run mtg-analysis fetch --verbose   # real data is not committed; re-fetch if data/ is gone
-uv run mtg-analysis build --verbose
+uv run pytest                          # expect 75 passed
+uv run mtg-analysis fetch --verbose    # data/ is gitignored; re-fetch if absent
+uv run mtg-analysis build --verbose    # the default_cards pass is the slow step
 uv run mtg-analysis validate
 ```
 
-`data/` is gitignored — a fresh clone has no tables. The commands above rebuild
-from live Scryfall data in a few minutes (fetch ~100 MB total; the `default_cards`
-parse for `first_printed_year` is the slow step).
+A full rebuild from live Scryfall takes a few minutes and ~100 MB of download.
